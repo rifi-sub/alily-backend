@@ -1,4 +1,13 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+// On Node < 22 the global WebSocket is not available; supabase realtime needs a transport.
+let wsTransport: any | null = null;
+try {
+  // require to avoid ESM/TS import issues in environments that don't have ws
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  wsTransport = require('ws');
+} catch (e) {
+  wsTransport = null;
+}
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -8,9 +17,13 @@ console.log('Supabase init - Key:', SUPABASE_SERVICE_KEY ? 'set' : 'NOT SET');
 
 let supabaseClient: SupabaseClient | null = null;
 
-if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
+  if (SUPABASE_URL && SUPABASE_SERVICE_KEY) {
   console.log('Creating real Supabase client');
-  supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+  const options: any = {};
+  if (wsTransport) {
+    options.realtime = { transport: wsTransport };
+  }
+  supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, options);
 } else {
   console.warn('Supabase env vars missing, using stub');
   // Create a proper stub with all required method chains
