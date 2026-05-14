@@ -123,9 +123,14 @@ router.post('/capture-order', async (req: Request, res: Response) => {
     });
 
     if (response.result.status !== 'COMPLETED') {
+      console.error('PayPal capture status:', response.result.status);
       return res
         .status(400)
-        .json({ error: 'PayPal payment not completed', status: response.result.status });
+        .json({ 
+          error: 'PayPal payment not completed', 
+          status: response.result.status,
+          orderId
+        });
     }
 
     // If this is a guest order (no userId, but has customerEmail)
@@ -147,7 +152,11 @@ router.post('/capture-order', async (req: Request, res: Response) => {
 
       if (guestOrderError) {
         console.error('Guest order insert error:', guestOrderError);
-        return res.status(500).json({ error: 'Failed to create order' });
+        return res.status(500).json({ 
+          error: 'Failed to create order', 
+          details: guestOrderError.message,
+          hint: 'Make sure guest_orders table exists in Supabase'
+        });
       }
 
       return res.json({ success: true, orderId: guestOrderData.id, orderCode: guestOrderData.order_code });
