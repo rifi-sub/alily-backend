@@ -56,3 +56,4 @@ router.get('/verify', adminOnly_1.default, (_req, res) => {
     return res.json({ admin: true, ok: true });
 });
 exports.default = router;
+//# sourceMappingURL=auth.js.map

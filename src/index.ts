@@ -9,6 +9,7 @@ import authRoutes from './routes/auth';
 import itemsRoutes from './routes/items';
 import accountRoutes from './routes/account';
 import adminRoutes from './routes/admin';
+import paymentsRoutes from './routes/payments';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -30,5 +31,6 @@ app.use('/api/auth', authRoutes);
 app.use('/api/items', itemsRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/payments', paymentsRoutes);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

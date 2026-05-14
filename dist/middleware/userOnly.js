@@ -21,3 +21,4 @@ async function userOnly(req, res, next) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 }
+//# sourceMappingURL=userOnly.js.map

@@ -26,3 +26,4 @@ router.get('/vouchers', userOnly_1.default, async (req, res) => {
     }
 });
 exports.default = router;
+//# sourceMappingURL=account.js.map

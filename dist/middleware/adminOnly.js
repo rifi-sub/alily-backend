@@ -25,3 +25,4 @@ function adminOnly(req, res, next) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 }
+//# sourceMappingURL=adminOnly.js.map

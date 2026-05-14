@@ -164,3 +164,4 @@ router.delete('/:id', adminOnly_1.default, async (req, res) => {
     }
 });
 exports.default = router;
+//# sourceMappingURL=items.js.map

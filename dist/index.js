@@ -12,6 +12,7 @@ const auth_1 = __importDefault(require("./routes/auth"));
 const items_1 = __importDefault(require("./routes/items"));
 const account_1 = __importDefault(require("./routes/account"));
 const admin_1 = __importDefault(require("./routes/admin"));
+const payments_1 = __importDefault(require("./routes/payments"));
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 3001;
 console.log('FRONTEND_URL:', process.env.FRONTEND_URL);
@@ -28,4 +29,6 @@ app.use('/api/auth', auth_1.default);
 app.use('/api/items', items_1.default);
 app.use('/api/account', account_1.default);
 app.use('/api/admin', admin_1.default);
+app.use('/api/payments', payments_1.default);
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+//# sourceMappingURL=index.js.map
