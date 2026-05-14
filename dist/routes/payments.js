@@ -11,14 +11,18 @@ const paypal_server_sdk_2 = require("@paypal/paypal-server-sdk");
 const router = express_1.default.Router();
 /**
  * POST /api/payments/create-order
- * Creates a PayPal order for purchasing credits
+ * Creates a PayPal order for purchasing credits or items
  */
 router.post('/create-order', async (req, res) => {
     try {
-        const { credits, amount } = req.body;
+        const { credits, amount, orderCode, customerEmail, items } = req.body;
         if (!credits || !amount) {
             return res.status(400).json({ error: 'Missing credits or amount' });
         }
+        const description = items && items.length > 0
+            ? `Purchase ${items.length} item(s)`
+            : `Purchase ${credits} credits`;
+        const customId = orderCode || `order-${Date.now()}`;
         const createOrderRequest = {
             intent: paypal_server_sdk_1.CheckoutPaymentIntent.Capture,
             purchaseUnits: [
@@ -33,8 +37,8 @@ router.post('/create-order', async (req, res) => {
                             },
                         },
                     },
-                    description: `Purchase ${credits} credits`,
-                    customId: `credits-${credits}`,
+                    description,
+                    customId,
                 },
             ],
         };
@@ -54,13 +58,13 @@ router.post('/create-order', async (req, res) => {
 });
 /**
  * POST /api/payments/capture-order
- * Captures a PayPal order and adds credits to user
+ * Captures a PayPal order and adds credits to user or creates guest order
  */
 router.post('/capture-order', async (req, res) => {
     try {
-        const { orderId, userId, credits } = req.body;
-        if (!orderId || !userId || !credits) {
-            return res.status(400).json({ error: 'Missing orderId, userId, or credits' });
+        const { orderId, userId, credits, customerEmail, customerName, items, orderCode } = req.body;
+        if (!orderId) {
+            return res.status(400).json({ error: 'Missing orderId' });
         }
         const ordersController = new paypal_server_sdk_2.OrdersController(paypal_1.default);
         const response = await ordersController.captureOrder({
@@ -71,28 +75,54 @@ router.post('/capture-order', async (req, res) => {
                 .status(400)
                 .json({ error: 'PayPal payment not completed', status: response.result.status });
         }
-        // Add credits to user via Supabase function
-        const { error: rpcError } = await supabase_1.supabase.rpc('add_credits', {
-            user_id: userId,
-            amount: credits,
-        });
-        if (rpcError) {
-            console.error('RPC error:', rpcError);
-            return res.status(500).json({ error: 'Failed to add credits' });
+        // If this is a guest order (no userId, but has customerEmail)
+        if (!userId && customerEmail) {
+            // Create guest order
+            const { data: guestOrderData, error: guestOrderError } = await supabase_1.supabase
+                .from('guest_orders')
+                .insert({
+                order_code: orderCode || `ORD-${Date.now()}`,
+                customer_email: customerEmail,
+                customer_name: customerName,
+                items: items || [],
+                total_amount: credits || 0,
+                paypal_order_id: orderId,
+                status: 'completed',
+            })
+                .select()
+                .single();
+            if (guestOrderError) {
+                console.error('Guest order insert error:', guestOrderError);
+                return res.status(500).json({ error: 'Failed to create order' });
+            }
+            return res.json({ success: true, orderId: guestOrderData.id, orderCode: guestOrderData.order_code });
         }
-        // Insert transaction record
-        const { error: transactionError } = await supabase_1.supabase
-            .from('credit_transactions')
-            .insert({
-            user_id: userId,
-            amount: credits,
-            type: 'purchase',
-            reference: orderId,
-        });
-        if (transactionError) {
-            console.error('Transaction insert error:', transactionError);
+        // Otherwise, this is a registered user purchase (credits)
+        if (userId && credits) {
+            // Add credits to user via Supabase function
+            const { error: rpcError } = await supabase_1.supabase.rpc('add_credits', {
+                user_id: userId,
+                amount: credits,
+            });
+            if (rpcError) {
+                console.error('RPC error:', rpcError);
+                return res.status(500).json({ error: 'Failed to add credits' });
+            }
+            // Insert transaction record
+            const { error: transactionError } = await supabase_1.supabase
+                .from('credit_transactions')
+                .insert({
+                user_id: userId,
+                amount: credits,
+                type: 'purchase',
+                reference: orderId,
+            });
+            if (transactionError) {
+                console.error('Transaction insert error:', transactionError);
+            }
+            return res.json({ success: true, credits });
         }
-        res.json({ success: true, credits });
+        return res.status(400).json({ error: 'Missing required fields for order completion' });
     }
     catch (error) {
         console.error('Capture order error:', error);
