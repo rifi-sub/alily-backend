@@ -67,17 +67,36 @@ router.post('/capture-order', async (req, res) => {
             return res.status(400).json({ error: 'Missing orderId' });
         }
         const ordersController = new paypal_server_sdk_2.OrdersController(paypal_1.default);
-        const response = await ordersController.captureOrder({
-            id: orderId,
-        });
+        let response;
+        try {
+            response = await ordersController.captureOrder({
+                id: orderId,
+            });
+        }
+        catch (paypalError) {
+            console.error('PayPal capture error:', paypalError);
+            const errorMessage = paypalError.message || 'PayPal error';
+            const statusCode = paypalError.statusCode || 500;
+            // Extract validation errors if available
+            const details = paypalError.result?.details || [];
+            return res.status(statusCode).json({
+                error: errorMessage,
+                paypal_error: paypalError.result?.name || 'UNKNOWN_ERROR',
+                details: details.length > 0 ? details : undefined,
+                hint: details.some((d) => d.issue === 'ORDER_NOT_APPROVED')
+                    ? 'Customer must approve the order on PayPal before capturing'
+                    : undefined
+            });
+        }
         if (response.result.status !== 'COMPLETED') {
             console.error('PayPal capture status:', response.result.status);
             return res
-                .status(400)
+                .status(422)
                 .json({
                 error: 'PayPal payment not completed',
                 status: response.result.status,
-                orderId
+                orderId,
+                hint: response.result.status === 'APPROVED' ? 'Order was approved but not captured. Please try again.' : 'Order status is ' + response.result.status
             });
         }
         // If this is a guest order (no userId, but has customerEmail)
