@@ -43,6 +43,18 @@ type OrderRow = {
   item_id: string | null;
   amount: number | string;
   status: string;
+  items?: Array<{ name?: string; productId?: string; quantity?: number }> | null;
+  created_at?: string;
+};
+
+type GuestOrderRow = {
+  id: string;
+  order_code: string;
+  customer_email: string;
+  customer_name?: string | null;
+  items?: Array<{ name?: string; productId?: string; quantity?: number }> | null;
+  total_amount: number | string;
+  status: string;
   created_at?: string;
 };
 
@@ -50,7 +62,21 @@ type EnrichedOrder = OrderRow & {
   user_email: string;
   item_title: string;
   item_image_url: string;
+  order_code?: string;
+  source?: 'registered' | 'guest';
+  customer_name?: string;
 };
+
+function isGuestOrdersMissingTableError(err: unknown) {
+  const anyErr = err as { code?: string; message?: string } | null;
+  if (!anyErr) return false;
+
+  // Postgres undefined_table
+  if (anyErr.code === '42P01') return true;
+
+  const message = (anyErr.message || '').toLowerCase();
+  return message.includes('guest_orders') && (message.includes('does not exist') || message.includes('not found'));
+}
 
 const ORDER_STATUSES = ['pending', 'confirmed', 'shipped', 'delivered', 'cancelled'] as const;
 
@@ -112,13 +138,41 @@ async function decorateOrders(rows: OrderRow[]): Promise<EnrichedOrder[]> {
   return rows.map((row) => {
     const user = row.user_id ? usersMap.get(row.user_id) : null;
     const item = row.item_id ? itemsMap.get(row.item_id) : null;
+    const firstItemName = Array.isArray(row.items) ? row.items.find((entry) => !!entry?.name)?.name : undefined;
+    const itemCount = Array.isArray(row.items) ? row.items.length : 0;
+    const fallbackTitle = firstItemName || (itemCount > 1 ? `${itemCount} items` : itemCount === 1 ? '1 item' : 'Unknown item');
 
     return {
       ...row,
       amount: toNumber(row.amount),
       user_email: user?.email || 'Unknown user',
-      item_title: item?.title || 'Unknown item',
+      item_title: item?.title || fallbackTitle,
       item_image_url: item?.image_url || '',
+      order_code: `REG-${row.id.slice(0, 8).toUpperCase()}`,
+      source: 'registered',
+    };
+  });
+}
+
+function decorateGuestOrders(rows: GuestOrderRow[]): EnrichedOrder[] {
+  return rows.map((row) => {
+    const firstItemName = Array.isArray(row.items) ? row.items.find((entry) => !!entry?.name)?.name : undefined;
+    const itemCount = Array.isArray(row.items) ? row.items.length : 0;
+    const fallbackTitle = firstItemName || (itemCount > 1 ? `${itemCount} items` : itemCount === 1 ? '1 item' : 'Unknown item');
+
+    return {
+      id: row.id,
+      user_id: null,
+      item_id: null,
+      amount: toNumber(row.total_amount),
+      status: row.status,
+      created_at: row.created_at,
+      user_email: row.customer_email,
+      item_title: fallbackTitle,
+      item_image_url: '',
+      order_code: row.order_code,
+      source: 'guest',
+      customer_name: row.customer_name || '',
     };
   });
 }
@@ -158,7 +212,7 @@ router.get('/users/:id', async (req, res) => {
     const [profileRes, vouchersRes, ordersRes] = await Promise.all([
       supabase.from('profiles').select('id, voucher_balance, created_at').eq('id', id).maybeSingle(),
       supabase.from('vouchers').select('id, code, amount, used, user_id, created_at').eq('user_id', id).order('created_at', { ascending: false }),
-      supabase.from('orders').select('id, user_id, item_id, amount, status, created_at').eq('user_id', id).order('created_at', { ascending: false }),
+      supabase.from('orders').select('id, user_id, item_id, amount, status, items, created_at').eq('user_id', id).order('created_at', { ascending: false }),
     ]);
 
     if (profileRes.error) return res.status(500).json({ error: profileRes.error.message });
@@ -238,14 +292,32 @@ router.delete('/users/:id', async (req, res) => {
 
 router.get('/orders', async (_req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('id, user_id, item_id, amount, status, created_at')
-      .order('created_at', { ascending: false });
+    const [ordersRes, guestOrdersRes] = await Promise.all([
+      supabase
+        .from('orders')
+        .select('id, user_id, item_id, amount, status, items, created_at')
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('guest_orders')
+        .select('id, order_code, customer_email, customer_name, items, total_amount, status, created_at')
+        .order('created_at', { ascending: false }),
+    ]);
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (ordersRes.error) return res.status(500).json({ error: ordersRes.error.message });
+    if (guestOrdersRes.error && !isGuestOrdersMissingTableError(guestOrdersRes.error)) {
+      return res.status(500).json({ error: guestOrdersRes.error.message });
+    }
 
-    return res.json(await decorateOrders((data || []) as OrderRow[]));
+    const registered = await decorateOrders((ordersRes.data || []) as OrderRow[]);
+    const guest = guestOrdersRes.error ? [] : decorateGuestOrders((guestOrdersRes.data || []) as GuestOrderRow[]);
+
+    const merged = [...registered, ...guest].sort((a, b) => {
+      const dateA = new Date(a.created_at || '').getTime() || 0;
+      const dateB = new Date(b.created_at || '').getTime() || 0;
+      return dateB - dateA;
+    });
+
+    return res.json(merged);
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Server error' });
   }
@@ -254,17 +326,31 @@ router.get('/orders', async (_req, res) => {
 router.patch('/orders/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body || {};
+    const { status, source } = req.body || {};
 
     if (typeof status !== 'string' || !ORDER_STATUSES.includes(status as typeof ORDER_STATUSES[number])) {
       return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    if (source === 'guest') {
+      const { data, error } = await supabase
+        .from('guest_orders')
+        .update({ status })
+        .eq('id', id)
+        .select('id, order_code, customer_email, customer_name, items, total_amount, status, created_at')
+        .single();
+
+      if (error) return res.status(500).json({ error: error.message });
+
+      const [order] = decorateGuestOrders([data as GuestOrderRow]);
+      return res.json(order);
     }
 
     const { data, error } = await supabase
       .from('orders')
       .update({ status })
       .eq('id', id)
-      .select('id, user_id, item_id, amount, status, created_at')
+      .select('id, user_id, item_id, amount, status, items, created_at')
       .single();
 
     if (error) return res.status(500).json({ error: error.message });
@@ -371,23 +457,43 @@ router.delete('/vouchers/:id', async (req, res) => {
 
 router.get('/stats', async (_req, res) => {
   try {
-    const [itemsRes, vouchersRes, ordersRes, users, recentOrdersRes] = await Promise.all([
+    const [itemsRes, vouchersRes, ordersRes, guestOrdersRes, users, recentOrdersRes, recentGuestOrdersRes] = await Promise.all([
       supabase.from('items').select('id, status'),
       supabase.from('vouchers').select('id, amount, used').eq('used', false),
-      supabase.from('orders').select('id, user_id, item_id, amount, status, created_at'),
+      supabase.from('orders').select('id, user_id, item_id, amount, status, items, created_at'),
+      supabase.from('guest_orders').select('id, order_code, customer_email, customer_name, items, total_amount, status, created_at'),
       listAllAuthUsers(),
-      supabase.from('orders').select('id, user_id, item_id, amount, status, created_at').order('created_at', { ascending: false }).limit(5),
+      supabase.from('orders').select('id, user_id, item_id, amount, status, items, created_at').order('created_at', { ascending: false }).limit(5),
+      supabase.from('guest_orders').select('id, order_code, customer_email, customer_name, items, total_amount, status, created_at').order('created_at', { ascending: false }).limit(5),
     ]);
 
     if (itemsRes.error) return res.status(500).json({ error: itemsRes.error.message });
     if (vouchersRes.error) return res.status(500).json({ error: vouchersRes.error.message });
     if (ordersRes.error) return res.status(500).json({ error: ordersRes.error.message });
+    if (guestOrdersRes.error && !isGuestOrdersMissingTableError(guestOrdersRes.error)) {
+      return res.status(500).json({ error: guestOrdersRes.error.message });
+    }
     if (recentOrdersRes.error) return res.status(500).json({ error: recentOrdersRes.error.message });
+    if (recentGuestOrdersRes.error && !isGuestOrdersMissingTableError(recentGuestOrdersRes.error)) {
+      return res.status(500).json({ error: recentGuestOrdersRes.error.message });
+    }
 
     const items = itemsRes.data || [];
     const vouchers = vouchersRes.data || [];
-    const orders = ordersRes.data || [];
-    const recentOrders = await decorateOrders((recentOrdersRes.data || []) as OrderRow[]);
+    const orders = (ordersRes.data || []) as OrderRow[];
+    const guestOrders = guestOrdersRes.error ? [] : ((guestOrdersRes.data || []) as GuestOrderRow[]);
+
+    const recentRegisteredOrders = await decorateOrders((recentOrdersRes.data || []) as OrderRow[]);
+    const recentGuestOrders = recentGuestOrdersRes.error
+      ? []
+      : decorateGuestOrders((recentGuestOrdersRes.data || []) as GuestOrderRow[]);
+    const recentOrders = [...recentRegisteredOrders, ...recentGuestOrders]
+      .sort((a, b) => {
+        const dateA = new Date(a.created_at || '').getTime() || 0;
+        const dateB = new Date(b.created_at || '').getTime() || 0;
+        return dateB - dateA;
+      })
+      .slice(0, 5);
 
     return res.json({
       totalItems: items.length,
@@ -397,7 +503,9 @@ router.get('/stats', async (_req, res) => {
       totalVouchers: vouchers.length,
       totalVoucherValue: vouchers.reduce((sum: number, voucher: VoucherRow) => sum + toNumber(voucher.amount), 0),
       recentOrders,
-      pendingOrders: orders.filter((order: OrderRow) => order.status === 'pending').length,
+      pendingOrders:
+        orders.filter((order: OrderRow) => order.status === 'pending').length +
+        guestOrders.filter((order: GuestOrderRow) => order.status === 'pending').length,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Server error' });

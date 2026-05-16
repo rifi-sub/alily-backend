@@ -9,6 +9,11 @@ const paypal_1 = __importDefault(require("../lib/paypal"));
 const paypal_server_sdk_1 = require("@paypal/paypal-server-sdk");
 const paypal_server_sdk_2 = require("@paypal/paypal-server-sdk");
 const router = express_1.default.Router();
+function buildGuestOrderCode() {
+    const timestamp = Date.now().toString(36).toUpperCase();
+    const random = Math.random().toString(36).slice(2, 8).toUpperCase();
+    return `ORD-${timestamp}-${random}`;
+}
 /**
  * POST /api/payments/create-order
  * Creates a PayPal order for purchasing credits or items
@@ -101,17 +106,18 @@ router.post('/capture-order', async (req, res) => {
         }
         // If this is a guest order (no userId, but has customerEmail)
         if (!userId && customerEmail) {
+            const resolvedOrderCode = orderCode || buildGuestOrderCode();
             // Create guest order
             const { data: guestOrderData, error: guestOrderError } = await supabase_1.supabase
                 .from('guest_orders')
                 .insert({
-                order_code: orderCode || `ORD-${Date.now()}`,
+                order_code: resolvedOrderCode,
                 customer_email: customerEmail,
                 customer_name: customerName,
                 items: items || [],
                 total_amount: credits || 0,
                 paypal_order_id: orderId,
-                status: 'completed',
+                status: 'pending',
             })
                 .select()
                 .single();
@@ -122,6 +128,18 @@ router.post('/capture-order', async (req, res) => {
                     details: guestOrderError.message,
                     hint: 'Make sure guest_orders table exists in Supabase'
                 });
+            }
+            // Mark all purchased items as 'sold'
+            if (items && items.length > 0) {
+                const itemIds = items.map((item) => item.productId);
+                const { error: updateError } = await supabase_1.supabase
+                    .from('items')
+                    .update({ status: 'sold' })
+                    .in('id', itemIds);
+                if (updateError) {
+                    console.error('Failed to mark items as sold:', updateError);
+                    // Don't fail the order, just log the error
+                }
             }
             return res.json({ success: true, orderId: guestOrderData.id, orderCode: guestOrderData.order_code });
         }
@@ -147,6 +165,18 @@ router.post('/capture-order', async (req, res) => {
             });
             if (transactionError) {
                 console.error('Transaction insert error:', transactionError);
+            }
+            // Mark all purchased items as 'sold'
+            if (items && items.length > 0) {
+                const itemIds = items.map((item) => item.productId);
+                const { error: updateError } = await supabase_1.supabase
+                    .from('items')
+                    .update({ status: 'sold' })
+                    .in('id', itemIds);
+                if (updateError) {
+                    console.error('Failed to mark items as sold:', updateError);
+                    // Don't fail the order, just log the error
+                }
             }
             return res.json({ success: true, credits });
         }
@@ -215,6 +245,18 @@ router.post('/checkout', async (req, res) => {
         if (transactionError) {
             console.error('Transaction insert error:', transactionError);
         }
+        // Mark all purchased items as 'sold'
+        if (items && items.length > 0) {
+            const itemIds = items.map((item) => item.productId);
+            const { error: updateError } = await supabase_1.supabase
+                .from('items')
+                .update({ status: 'sold' })
+                .in('id', itemIds);
+            if (updateError) {
+                console.error('Failed to mark items as sold:', updateError);
+                // Don't fail the order, just log the error
+            }
+        }
         res.json({ success: true, orderId: orderData.id });
     }
     catch (error) {
@@ -242,6 +284,42 @@ router.get('/balance/:userId', async (req, res) => {
     catch (error) {
         console.error('Get balance error:', error);
         res.status(500).json({ error: error.message || 'Failed to get balance' });
+    }
+});
+/**
+ * GET /api/payments/order-status/:orderCode
+ * Public order status lookup for guest orders
+ */
+router.get('/order-status/:orderCode', async (req, res) => {
+    try {
+        const { orderCode } = req.params;
+        if (!orderCode) {
+            return res.status(400).json({ error: 'Missing order code' });
+        }
+        const { data, error } = await supabase_1.supabase
+            .from('guest_orders')
+            .select('order_code, status, customer_email, customer_name, total_amount, created_at, updated_at')
+            .eq('order_code', orderCode)
+            .maybeSingle();
+        if (error) {
+            return res.status(500).json({ error: error.message || 'Failed to fetch order status' });
+        }
+        if (!data) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+        return res.json({
+            orderCode: data.order_code,
+            status: data.status,
+            customerEmail: data.customer_email,
+            customerName: data.customer_name,
+            totalAmount: Number(data.total_amount || 0),
+            createdAt: data.created_at,
+            updatedAt: data.updated_at,
+        });
+    }
+    catch (error) {
+        console.error('Order status lookup error:', error);
+        return res.status(500).json({ error: error.message || 'Failed to fetch order status' });
     }
 });
 exports.default = router;
